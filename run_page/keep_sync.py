@@ -48,6 +48,10 @@ def login(session, mobile, password):
         token = r.json()["data"]["token"]
         headers["Authorization"] = f"Bearer {token}"
         return session, headers
+    else:
+        print(f"登录失败: {r.status_code}")
+        print(r.text)  # 打印错误信息
+        return None, None  # 返回两个 None
 
 
 def get_to_download_runs_ids(session, headers, sport_type):
