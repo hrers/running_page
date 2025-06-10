@@ -23,3 +23,6 @@ config.yaml
 .pdm-python
 *.db
 myenv/
+
+route.png
+route.svg
