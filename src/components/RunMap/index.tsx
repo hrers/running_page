@@ -1,4 +1,3 @@
-import MapboxLanguage from '@mapbox/mapbox-gl-language';
 import React, { useRef, useCallback, useState, useEffect } from 'react';
 import Map, {
   Layer,
@@ -6,23 +5,23 @@ import Map, {
   FullscreenControl,
   NavigationControl,
   MapRef,
-} from 'react-map-gl';
-import { MapInstance } from 'react-map-gl/src/types/lib';
+} from 'react-map-gl/maplibre';
+import type {
+  FilterSpecification,
+  Map as MaplibreMap,
+  MapDataEvent,
+} from 'maplibre-gl';
+import 'maplibre-gl/dist/maplibre-gl.css';
 import useActivities from '@/hooks/useActivities';
 import {
   IS_CHINESE,
   ROAD_LABEL_DISPLAY,
-  MAPBOX_TOKEN,
   PROVINCE_FILL_COLOR,
   COUNTRY_FILL_COLOR,
   USE_DASH_LINE,
   LINE_OPACITY,
   MAP_HEIGHT,
   PRIVACY_MODE,
-  LIGHTS_ON,
-  MAP_TILE_STYLE,
-  MAP_TILE_VENDOR,
-  MAP_TILE_ACCESS_TOKEN,
 } from '@/utils/const';
 import {
   Coordinate,
@@ -36,7 +35,6 @@ import RunMapButtons from './RunMapButtons';
 import styles from './style.module.css';
 import { FeatureCollection } from 'geojson';
 import { RPGeometry } from '@/static/run_countries';
-import './mapbox.css';
 import LightsControl from '@/components/RunMap/LightsControl';
 
 interface IRunMapProps {
@@ -48,6 +46,12 @@ interface IRunMapProps {
   thisYear: string;
 }
 
+const MAP_TILE_VENDOR = 'maptiler';
+const MAP_TILE_STYLE = 'dataviz-dark';
+const MAP_TILE_ACCESS_TOKEN =
+  import.meta.env.VITE_MAP_TILE_ACCESS_TOKEN?.trim() || 'Gt5R0jT8tuIYxW6sNrAg';
+const MAP_TILE_FALLBACK_STYLE = 'https://demotiles.maplibre.org/style.json';
+
 const RunMap = ({
   title,
   viewState,
@@ -57,16 +61,49 @@ const RunMap = ({
   thisYear,
 }: IRunMapProps) => {
   const { countries, provinces } = useActivities();
-  const mapRef = useRef<MapRef>();
-  const [lights, setLights] = useState(PRIVACY_MODE ? false : LIGHTS_ON);
+  const mapRef = useRef<MapRef | null>(null);
+  const [lights, setLights] = useState(PRIVACY_MODE ? false : true);
   const keepWhenLightsOff = ['runs2'];
   const mapStyle = getMapStyle(
     MAP_TILE_VENDOR,
     MAP_TILE_STYLE,
     MAP_TILE_ACCESS_TOKEN
   );
+  const [resolvedMapStyle, setResolvedMapStyle] = useState(mapStyle);
+  const fallbackStyleApplied = useRef(false);
 
-  function switchLayerVisibility(map: MapInstance, lights: boolean) {
+  useEffect(() => {
+    fallbackStyleApplied.current = false;
+    setResolvedMapStyle(mapStyle);
+  }, [mapStyle]);
+
+  const handleMapError = useCallback(
+    (event: { error?: { message?: string; status?: number } }) => {
+      if (
+        fallbackStyleApplied.current ||
+        resolvedMapStyle === MAP_TILE_FALLBACK_STYLE
+      ) {
+        return;
+      }
+
+      const message = `${event?.error?.message || ''}`;
+      const status = event?.error?.status;
+      const shouldFallback =
+        status === 401 ||
+        status === 403 ||
+        /401|403|unauthorized|forbidden|style|sprite|glyph|tile|source/i.test(
+          message
+        );
+
+      if (shouldFallback) {
+        fallbackStyleApplied.current = true;
+        setResolvedMapStyle(MAP_TILE_FALLBACK_STYLE);
+      }
+    },
+    [resolvedMapStyle]
+  );
+
+  function switchLayerVisibility(map: MaplibreMap, lights: boolean) {
     const styleJson = map.getStyle();
     styleJson.layers.forEach((it: { id: string }) => {
       if (!keepWhenLightsOff.includes(it.id)) {
@@ -75,50 +112,76 @@ const RunMap = ({
       }
     });
   }
-  const mapRefCallback = useCallback(
-    (ref: MapRef) => {
-      if (ref !== null) {
-        const map = ref.getMap();
-        if (map && IS_CHINESE) {
-          map.addControl(new MapboxLanguage({ defaultLanguage: 'zh-Hans' }));
+
+  function switchChineseLabels(map: MaplibreMap) {
+    const style = map.getStyle();
+    style.layers.forEach((layer: any) => {
+      if (layer.type === 'symbol' && layer.layout?.['text-field']) {
+        const tf = layer.layout['text-field'];
+        // Replace name:en / name:latin with name (shows local language)
+        if (typeof tf === 'string' && tf.includes('name:')) {
+          map.setLayoutProperty(
+            layer.id,
+            'text-field',
+            tf.replace(/name:\w+/g, 'name')
+          );
+        } else if (Array.isArray(tf)) {
+          // Expression form: ['get', 'name:en'] or ['coalesce', ['get', 'name:en'], ...]
+          const replaced = JSON.parse(
+            JSON.stringify(tf).replace(/name:\w+/g, 'name')
+          );
+          map.setLayoutProperty(layer.id, 'text-field', replaced);
         }
-        // all style resources have been downloaded
-        // and the first visually complete rendering of the base style has occurred.
-        // it's odd. when use style other than mapbox, the style.load event is not triggered.Add commentMore actions
-        // so I use data event instead of style.load event and make sure we handle it only once.
-        map.on('data', (event) => {
-          if (event.dataType !== 'style' || mapRef.current) {
-            return;
-          }
-          if (!ROAD_LABEL_DISPLAY) {
-            const layers = map.getStyle().layers;
-            const labelLayerNames = layers
-              .filter(
-                (layer: any) =>
-                  (layer.type === 'symbol' || layer.type === 'composite') &&
-                  layer.layout.text_field !== null
-              )
-              .map((layer: any) => layer.id);
-            labelLayerNames.forEach((layerId) => {
-              map.removeLayer(layerId);
-            });
-          }
-          mapRef.current = ref;
-          switchLayerVisibility(map, lights);
-        });
       }
-      if (mapRef.current) {
-        const map = mapRef.current.getMap();
+    });
+  }
+
+  const mapRefCallback = useCallback(
+    (ref: MapRef | null) => {
+      if (ref === null || mapRef.current) {
+        return;
+      }
+
+      const map = ref.getMap();
+      const onMapStyleReady = () => {
+        if (!ROAD_LABEL_DISPLAY) {
+          const layers = map.getStyle().layers;
+          const labelLayerNames = layers
+            .filter(
+              (layer: any) =>
+                (layer.type === 'symbol' || layer.type === 'composite') &&
+                layer.layout?.['text-field'] != null
+            )
+            .map((layer: any) => layer.id);
+          labelLayerNames.forEach((layerId) => {
+            map.removeLayer(layerId);
+          });
+        }
+        if (IS_CHINESE) {
+          switchChineseLabels(map);
+        }
+        mapRef.current = ref;
         switchLayerVisibility(map, lights);
+      };
+
+      if (map.isStyleLoaded()) {
+        onMapStyleReady();
+        return;
       }
+
+      const onData = (event: MapDataEvent) => {
+        if (event.dataType !== 'style') {
+          return;
+        }
+        map.off('data', onData);
+        onMapStyleReady();
+      };
+      map.on('data', onData);
     },
     [mapRef, lights]
   );
-  const filterProvinces = provinces.slice();
-  const filterCountries = countries.slice();
-  // for geojson format
-  filterProvinces.unshift('in', 'name');
-  filterCountries.unshift('in', 'name');
+  const filterProvinces: FilterSpecification = ['in', 'name', ...provinces];
+  const filterCountries: FilterSpecification = ['in', 'name', ...countries];
 
   const initGeoDataLength = geoData.features.length;
   const isBigMap = (viewState.zoom ?? 0) <= 3;
@@ -174,15 +237,21 @@ const RunMap = ({
     };
   }, []);
 
+  useEffect(() => {
+    if (mapRef.current) {
+      switchLayerVisibility(mapRef.current.getMap(), lights);
+    }
+  }, [lights]);
+
   return (
     <Map
       {...viewState}
       onMove={onMove}
       style={style}
-      mapStyle={mapStyle}
+      mapStyle={resolvedMapStyle}
       ref={mapRefCallback}
       cooperativeGestures={isTouchDevice()}
-      mapboxAccessToken={MAPBOX_TOKEN}
+      onError={handleMapError}
     >
       <RunMapButtons changeYear={changeYear} thisYear={thisYear} />
       <Source id="data" type="geojson" data={geoData}>

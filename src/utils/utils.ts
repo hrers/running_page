@@ -47,6 +47,8 @@ export interface Activity {
   streak: number;
 }
 
+const MAP_TILE_FALLBACK_STYLE = 'https://demotiles.maplibre.org/style.json';
+
 const titleForShow = (run: Activity): string => {
   const date = run.start_date_local.slice(0, 11);
   const distance = (run.distance / 1000.0).toFixed(2);
@@ -355,35 +357,62 @@ const getBoundsForGeoData = (
   geoData: FeatureCollection<LineString>
 ): IViewState => {
   const { features } = geoData;
-  let points: Coordinate[] = [];
-  // find first have data
+  let fallbackPoint: Coordinate | null = null;
+  let hasRenderableFeature = false;
+  let minLon = Infinity;
+  let minLat = Infinity;
+  let maxLon = -Infinity;
+  let maxLat = -Infinity;
+
   for (const f of features) {
-    if (f.geometry.coordinates.length) {
-      points = f.geometry.coordinates as Coordinate[];
-      break;
+    const coords = f.geometry.coordinates as Coordinate[];
+    if (!coords.length) {
+      continue;
+    }
+    if (!fallbackPoint) {
+      fallbackPoint = coords[0];
+    }
+
+    const [startLon, startLat] = coords[0];
+    let renderable = false;
+    for (let i = 1; i < coords.length; i++) {
+      const [lon, lat] = coords[i];
+      if (lon !== startLon || lat !== startLat) {
+        renderable = true;
+        break;
+      }
+    }
+
+    if (!renderable) {
+      continue;
+    }
+
+    hasRenderableFeature = true;
+    for (const [lon, lat] of coords) {
+      if (lon < minLon) minLon = lon;
+      if (lat < minLat) minLat = lat;
+      if (lon > maxLon) maxLon = lon;
+      if (lat > maxLat) maxLat = lat;
     }
   }
-  if (points.length === 0) {
+
+  if (!fallbackPoint) {
     return { longitude: 20, latitude: 20, zoom: 3 };
   }
-  if (points.length === 2 && String(points[0]) === String(points[1])) {
-    return { longitude: points[0][0], latitude: points[0][1], zoom: 9 };
+  if (!hasRenderableFeature) {
+    return { longitude: fallbackPoint[0], latitude: fallbackPoint[1], zoom: 9 };
   }
-  // Calculate corner values of bounds
-  const pointsLong = points.map((point) => point[0]) as number[];
-  const pointsLat = points.map((point) => point[1]) as number[];
+
   const cornersLongLat: [Coordinate, Coordinate] = [
-    [Math.min(...pointsLong), Math.min(...pointsLat)],
-    [Math.max(...pointsLong), Math.max(...pointsLat)],
+    [minLon, minLat],
+    [maxLon, maxLat],
   ];
   const viewState = new WebMercatorViewport({
     width: 800,
     height: 600,
   }).fitBounds(cornersLongLat, { padding: 200 });
-  let { longitude, latitude, zoom } = viewState;
-  if (features.length > 1) {
-    zoom = 11.5;
-  }
+  const { longitude, latitude } = viewState;
+  const zoom = Math.min(viewState.zoom, 11.5);
   return { longitude, latitude, zoom };
 };
 
@@ -425,13 +454,23 @@ const sortDateFunc = (a: Activity, b: Activity) => {
 const sortDateFuncReverse = (a: Activity, b: Activity) => sortDateFunc(b, a);
 
 const getMapStyle = (vendor: string, styleName: string, token: string) => {
-  const style = (MAP_TILE_STYLES as any)[vendor][styleName];
-  if (!style) {
-    return MAP_TILE_STYLES.default;
+  const vendorStyles = (MAP_TILE_STYLES as any)[vendor];
+  if (!vendorStyles) {
+    return MAP_TILE_FALLBACK_STYLE;
   }
+
+  const style = vendorStyles[styleName];
+  if (!style) {
+    return MAP_TILE_FALLBACK_STYLE;
+  }
+
   if (vendor === 'maptiler' || vendor === 'stadiamaps') {
+    if (!token?.trim()) {
+      return MAP_TILE_FALLBACK_STYLE;
+    }
     return style + token;
   }
+
   return style;
 };
 
