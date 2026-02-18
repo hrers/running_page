@@ -199,8 +199,10 @@ class Track:
             start_time = self.start_time
             for i in range(1, len(trackpoints)):
                 delta = trackpoints[i].time - trackpoints[i - 1].time
-                if datetime.timedelta(0) <= delta <= datetime.timedelta(
-                    seconds=seconds_threshold
+                if (
+                    datetime.timedelta(0)
+                    <= delta
+                    <= datetime.timedelta(seconds=seconds_threshold)
                 ):
                     moving_time += (
                         trackpoints[i].time.timestamp() - start_time.timestamp()
