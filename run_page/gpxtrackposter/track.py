@@ -7,6 +7,7 @@
 
 import datetime
 from datetime import timezone
+import math
 import os
 from collections import namedtuple
 
@@ -197,7 +198,8 @@ class Track:
         try:
             start_time = self.start_time
             for i in range(1, len(trackpoints)):
-                if trackpoints[i].time - trackpoints[i - 1].time <= datetime.timedelta(
+                delta = trackpoints[i].time - trackpoints[i - 1].time
+                if datetime.timedelta(0) <= delta <= datetime.timedelta(
                     seconds=seconds_threshold
                 ):
                     moving_time += (
@@ -221,6 +223,12 @@ class Track:
             )
             self.start_time_local, self.end_time_local = parse_datetime_to_local(
                 self.start_time, self.end_time, None
+            )
+        if not self._is_reasonable_datetime(
+            self.start_time
+        ) or not self._is_reasonable_datetime(self.end_time):
+            raise TrackLoadError(
+                f"Track has invalid time range: start={self.start_time}, end={self.end_time}"
             )
         # use timestamp as id
         self.run_id = self.__make_run_id(self.start_time)
@@ -317,6 +325,15 @@ class Track:
                 for extension in gpx.extensions
             }
         )
+        base_distance = self.moving_dict.get("distance", self.length)
+        base_avg_speed = self.moving_dict.get("average_speed", 0)
+        base_moving_time = self.moving_dict.get(
+            "moving_time", datetime.timedelta(seconds=0)
+        )
+        base_elapsed_time = self.moving_dict.get(
+            "elapsed_time", datetime.timedelta(seconds=0)
+        )
+
         self.length = (
             self.length
             if gpx_extensions.get("distance") is None
@@ -328,24 +345,24 @@ class Track:
             else float(gpx_extensions.get("average_hr"))
         )
         self.moving_dict["average_speed"] = (
-            self.moving_dict["average_speed"]
+            base_avg_speed
             if gpx_extensions.get("average_speed") is None
             else float(gpx_extensions.get("average_speed"))
         )
         self.moving_dict["distance"] = (
-            self.moving_dict["distance"]
+            base_distance
             if gpx_extensions.get("distance") is None
             else float(gpx_extensions.get("distance"))
         )
 
         self.moving_dict["moving_time"] = (
-            self.moving_dict["moving_time"]
+            base_moving_time
             if gpx_extensions.get("moving_time") is None
             else datetime.timedelta(seconds=float(gpx_extensions.get("moving_time")))
         )
 
         self.moving_dict["elapsed_time"] = (
-            self.moving_dict["elapsed_time"]
+            base_elapsed_time
             if gpx_extensions.get("elapsed_time") is None
             else datetime.timedelta(seconds=float(gpx_extensions.get("elapsed_time")))
         )
@@ -449,15 +466,50 @@ class Track:
     def _get_moving_data(gpx, moving_time):
         moving_data = gpx.get_moving_data()
         elapsed_time = moving_data.moving_time
-        moving_time = moving_time or elapsed_time
+        moving_distance = moving_data.moving_distance or 0
+        moving_distance = moving_distance if moving_distance > 0 else 0
+
+        def _safe_seconds(value):
+            try:
+                sec = float(value)
+            except Exception:
+                return None
+            if not math.isfinite(sec) or sec <= 0 or sec > 60 * 60 * 24 * 31:
+                return None
+            return sec
+
+        elapsed_seconds = _safe_seconds(elapsed_time)
+        moving_seconds = _safe_seconds(moving_time)
+
+        if elapsed_seconds is None and moving_seconds is None:
+            elapsed_seconds = 1.0
+            moving_seconds = 1.0
+        elif elapsed_seconds is None:
+            elapsed_seconds = moving_seconds
+        elif moving_seconds is None:
+            moving_seconds = elapsed_seconds
+
+        if moving_seconds > elapsed_seconds * 2:
+            moving_seconds = elapsed_seconds
+
         return {
-            "distance": moving_data.moving_distance,
-            "moving_time": datetime.timedelta(seconds=moving_time),
-            "elapsed_time": datetime.timedelta(seconds=elapsed_time),
+            "distance": moving_distance,
+            "moving_time": datetime.timedelta(seconds=moving_seconds),
+            "elapsed_time": datetime.timedelta(seconds=elapsed_seconds),
             "average_speed": (
-                moving_data.moving_distance / moving_time if moving_time else 0
+                moving_distance / moving_seconds if moving_seconds else 0
             ),
         }
+
+    @staticmethod
+    def _is_reasonable_datetime(value):
+        if value is None:
+            return False
+        try:
+            year = value.year
+        except Exception:
+            return False
+        return 1970 <= year <= 2100
 
     def to_namedtuple(self, run_from="gpx"):
         d = {

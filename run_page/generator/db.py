@@ -155,6 +155,10 @@ def update_or_create_activity(session, run_activity):
     except Exception as e:
         print(f"something wrong with {run_activity.id}")
         print(str(e))
+        try:
+            session.rollback()
+        except Exception:
+            pass
 
     return created
 
